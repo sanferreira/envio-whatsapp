@@ -40,58 +40,96 @@ const contatos = linhas
   })
   .filter(c => c.nome && c.numero); // evita entradas vazias
 
-function gerarMensagem(nome) {
-  return `Olá ${nome}, esta é uma mensagem automática enviada via WhatsApp. o San ama muito vocês ama muito vocês!`;
+// Conta quantas vezes um número já recebeu mensagem
+function vezesEnviado(numero) {
+  return historico.filter(reg => reg.numero === numero).length;
 }
 
-function contatosNaoEnviados() {
-  const enviados = new Set(
-    historico
-      .filter(reg => reg.status === 'sucesso')
-      .map(reg => reg.numero)
-  );
+// Gera a mensagem personalizada
+function gerarMensagem(nome, tentativa) {
+  const primeiroNome = nome.split(' ')[0];
 
-  return contatos.filter(contato => !enviados.has(contato.numero));
+  const hora = new Date().getHours();
+  let saudacao;
+
+  if (hora >= 5 && hora < 12) {
+    saudacao = 'Bom dia';
+  } else if (hora >= 12 && hora < 18) {
+    saudacao = 'Boa tarde';
+  } else {
+    saudacao = 'Boa noite';
+  }
+
+    if (tentativa === 1) {
+      return `${saudacao}, ${primeiroNome}, tudo bem?`;
+    } else if(tentativa === 2) {
+      return `${primeiroNome}?`;
+    }else{
+      return `??`;
+    }
 }
 
+// Limite máximo de tentativas por contato
+const MAX_TENTATIVAS = 3;
+
+// Cria sessão e envia mensagens
 venom
   .create({
-    session: 'whatsapp-session', 
-    browserArgs: ['--no-sandbox'], 
-    })
+    session: 'whatsapp-session',
+    browserArgs: ['--no-sandbox'],
+  })
   .then((client) => enviarMensagens(client))
   .catch((erro) => {
     console.error('Erro ao iniciar o Venom:', erro);
   });
 
+// Envia as mensagens com delay e registro, com retry individual
 async function enviarMensagens(client) {
-  const listaParaEnvio = contatosNaoEnviados();
+  // Filtra contatos que ainda não chegaram ao limite de tentativas
+  const listaParaEnvio = contatos.filter(contato => {
+    const tentativas = historico.filter(reg => reg.numero === contato.numero).length;
+    return tentativas < MAX_TENTATIVAS;
+  });
 
   console.log(`📨 Iniciando envio para ${listaParaEnvio.length} contatos...`);
 
   for (const contato of listaParaEnvio) {
-    const mensagem = gerarMensagem(contato.nome);
-    const registro = {
-      nome: contato.nome,
-      numero: contato.numero,
-      mensagem,
-      timestamp: new Date().toISOString()
-    };
+    let enviadoComSucesso = false;
+    let tentativa = vezesEnviado(contato.numero) + 1;
 
-    try {
-      await client.sendText(`${contato.numero}@c.us`, mensagem);
-      registro.status = 'sucesso';
-      console.log(`✅ Mensagem enviada para ${contato.nome}`);
-    } catch (erro) {
-      registro.status = 'erro';
-      registro.erro = erro.message;
-      console.error(`❌ Erro ao enviar para ${contato.nome}:`, erro.message);
+    while (!enviadoComSucesso && tentativa <= MAX_TENTATIVAS) {
+      const mensagem = gerarMensagem(contato.nome, tentativa);
+
+      const registro = {
+        nome: contato.nome,
+        numero: contato.numero,
+        tentativa,
+        mensagem,
+        timestamp: new Date().toISOString()
+      };
+
+      try {
+        await client.sendText(`${contato.numero}@c.us`, mensagem);
+        registro.status = 'sucesso';
+        console.log(`✅ Mensagem enviada para ${contato.nome} (tentativa ${tentativa})`);
+        enviadoComSucesso = true;
+      } catch (erro) {
+        registro.status = 'erro';
+        registro.erro = erro.message;
+        console.error(`❌ Erro ao enviar para ${contato.nome} (tentativa ${tentativa}):`, erro.message);
+      }
+
+      historico.push(registro);
+      fs.writeFileSync(logPath, JSON.stringify(historico, null, 2));
+
+      if (!enviadoComSucesso) {
+        tentativa++;
+        await delay(3000); // espera antes de tentar novamente
+      }
     }
 
-    historico.push(registro);
-    fs.writeFileSync(logPath, JSON.stringify(historico, null, 2));
-
-    await delay(5000); // 5 segundos
+    // Atraso entre contatos, mesmo que tenha tido sucesso rápido
+    await delay(3000);
   }
 
   console.log("📄 Registro atualizado em envios.json");
